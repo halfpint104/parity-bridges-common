@@ -20,7 +20,9 @@
 use crate::Config;
 
 use bp_messages::{
-	source_chain::{LaneMessageVerifier, MessageDeliveryAndDispatchPayment, RelayersRewards, TargetHeaderChain},
+	source_chain::{
+		LaneMessageVerifier, MessageDeliveryAndDispatchPayment, RelayersRewards, SenderOrigin, TargetHeaderChain,
+	},
 	target_chain::{DispatchMessage, MessageDispatch, ProvedLaneMessages, ProvedMessages, SourceHeaderChain},
 	InboundLaneData, LaneId, Message, MessageData, MessageKey, MessageNonce, OutboundLaneData,
 	Parameter as MessagesParameter,
@@ -152,12 +154,22 @@ impl Config for TestRuntime {
 
 	type AccountIdConverter = AccountIdConverter;
 
+	type SenderOrigin = Origin;
 	type TargetHeaderChain = TestTargetHeaderChain;
 	type LaneMessageVerifier = TestLaneMessageVerifier;
 	type MessageDeliveryAndDispatchPayment = TestMessageDeliveryAndDispatchPayment;
 
 	type SourceHeaderChain = TestSourceHeaderChain;
 	type MessageDispatch = TestMessageDispatch;
+}
+
+impl SenderOrigin<AccountId> for Origin {
+	fn linked_account(&self) -> Option<AccountId> {
+		match self.caller {
+			OriginCaller::system(frame_system::RawOrigin::Signed(ref submitter)) => Some(submitter.clone()),
+			_ => None,
+		}
+	}
 }
 
 impl Size for TestPayload {

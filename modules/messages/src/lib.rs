@@ -45,7 +45,9 @@ use crate::outbound_lane::{OutboundLane, OutboundLaneStorage};
 use crate::weights::WeightInfo;
 
 use bp_messages::{
-	source_chain::{LaneMessageVerifier, MessageDeliveryAndDispatchPayment, RelayersRewards, TargetHeaderChain},
+	source_chain::{
+		LaneMessageVerifier, MessageDeliveryAndDispatchPayment, RelayersRewards, SenderOrigin, TargetHeaderChain,
+	},
 	target_chain::{DispatchMessage, MessageDispatch, ProvedLaneMessages, ProvedMessages, SourceHeaderChain},
 	total_unrewarded_messages, InboundLaneData, LaneId, MessageData, MessageKey, MessageNonce, MessagePayload,
 	OutboundLaneData, Parameter as MessagesParameter, UnrewardedRelayersState,
@@ -136,18 +138,20 @@ pub trait Config<I = DefaultInstance>: frame_system::Config {
 
 	// Types that are used by outbound_lane (on source chain).
 
+	/// Message sender origin.
+	type SenderOrigin: SenderOrigin<Self::AccountId> + From<Self::Origin>;
 	/// Target header chain.
 	type TargetHeaderChain: TargetHeaderChain<Self::OutboundPayload, Self::AccountId>;
 	/// Message payload verifier.
 	type LaneMessageVerifier: LaneMessageVerifier<
-		Self::Origin,
+		Self::SenderOrigin,
 		Self::AccountId,
 		Self::OutboundPayload,
 		Self::OutboundMessageFee,
 	>;
 	/// Message delivery payment.
 	type MessageDeliveryAndDispatchPayment: MessageDeliveryAndDispatchPayment<
-		Self::Origin,
+		Self::SenderOrigin,
 		Self::AccountId,
 		Self::OutboundMessageFee,
 	>;
@@ -324,6 +328,7 @@ decl_module! {
 				})?;
 
 			// now let's enforce any additional lane rules
+			let origin = T::SenderOrigin::from(origin);
 			let mut lane = outbound_lane::<T, I>(lane_id);
 			T::LaneMessageVerifier::verify_message(
 				&origin,
@@ -400,7 +405,7 @@ decl_module! {
 
 			// withdraw additional fee from submitter
 			T::MessageDeliveryAndDispatchPayment::pay_delivery_and_dispatch_fee(
-				&origin,
+				&T::SenderOrigin::from(origin),
 				&additional_fee,
 				&Self::relayer_fund_account_id(),
 			).map_err(|err| {
