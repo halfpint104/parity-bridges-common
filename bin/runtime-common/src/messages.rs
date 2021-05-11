@@ -22,7 +22,7 @@
 
 use bp_message_dispatch::MessageDispatch as _;
 use bp_messages::{
-	source_chain::{LaneMessageVerifier, Sender},
+	source_chain::LaneMessageVerifier,
 	target_chain::{DispatchMessage, MessageDispatch, ProvedLaneMessages, ProvedMessages},
 	InboundLaneData, LaneId, Message, MessageData, MessageKey, MessageNonce, OutboundLaneData,
 };
@@ -87,6 +87,8 @@ pub struct MessageTransaction<Weight> {
 
 /// This chain that has `pallet-bridge-messages` and `dispatch` modules.
 pub trait ThisChainWithMessages: ChainWithMessages {
+	/// Call origin on the chain.
+	type Origin;
 	/// Call type on the chain.
 	type Call: Encode + Decode;
 
@@ -141,6 +143,7 @@ pub(crate) type WeightOf<C> = <C as ChainWithMessages>::Weight;
 pub(crate) type BalanceOf<C> = <C as ChainWithMessages>::Balance;
 pub(crate) type MessagesInstanceOf<C> = <C as ChainWithMessages>::MessagesInstance;
 
+pub(crate) type OriginOf<C> = <C as ThisChainWithMessages>::Origin;
 pub(crate) type CallOf<C> = <C as ThisChainWithMessages>::Call;
 
 /// Raw storage proof type (just raw trie nodes).
@@ -236,17 +239,26 @@ pub mod source {
 	pub(crate) const TOO_MANY_PENDING_MESSAGES: &str = "Too many pending messages at the lane.";
 	pub(crate) const BAD_ORIGIN: &str = "Unable to match the source origin to expected target origin.";
 	pub(crate) const TOO_LOW_FEE: &str = "Provided fee is below minimal threshold required by the lane.";
+	pub(crate) const INVALID_SUBMITTER_ORIGIN: &str = "The submitter origin is invalid.";
 
-	impl<B> LaneMessageVerifier<AccountIdOf<ThisChain<B>>, FromThisChainMessagePayload<B>, BalanceOf<ThisChain<B>>>
-		for FromThisChainMessageVerifier<B>
+	impl<B>
+		LaneMessageVerifier<
+			OriginOf<ThisChain<B>>,
+			AccountIdOf<ThisChain<B>>,
+			FromThisChainMessagePayload<B>,
+			BalanceOf<ThisChain<B>>,
+		> for FromThisChainMessageVerifier<B>
 	where
 		B: MessageBridge,
+		// matches requirements from the `frame_system::Config::Origin`
+		OriginOf<ThisChain<B>>:
+			Clone + Into<Result<frame_system::RawOrigin<AccountIdOf<ThisChain<B>>>, OriginOf<ThisChain<B>>>>,
 		AccountIdOf<ThisChain<B>>: PartialEq + Clone,
 	{
 		type Error = &'static str;
 
 		fn verify_message(
-			submitter: &Sender<AccountIdOf<ThisChain<B>>>,
+			submitter: &OriginOf<ThisChain<B>>,
 			delivery_and_dispatch_fee: &BalanceOf<ThisChain<B>>,
 			lane: &LaneId,
 			lane_outbound_data: &OutboundLaneData,
@@ -268,7 +280,13 @@ pub mod source {
 
 			// Do the dispatch-specific check. We assume that the target chain uses
 			// `Dispatch`, so we verify the message accordingly.
-			pallet_bridge_dispatch::verify_message_origin(submitter, payload).map_err(|_| BAD_ORIGIN)?;
+			let raw_origin_or_err: Result<frame_system::RawOrigin<AccountIdOf<ThisChain<B>>>, OriginOf<ThisChain<B>>> =
+				submitter.clone().into();
+			pallet_bridge_dispatch::verify_message_origin(
+				&raw_origin_or_err.map_err(|_| INVALID_SUBMITTER_ORIGIN)?,
+				payload,
+			)
+			.map_err(|_| BAD_ORIGIN)?;
 
 			let minimal_fee_in_this_tokens =
 				estimate_message_dispatch_and_delivery_fee::<B>(payload, B::RELAYER_FEE_PERCENT)?;
@@ -732,6 +750,14 @@ mod tests {
 		#[codec(index = 84)]
 		Mint,
 	}
+	#[derive(Clone, Debug)]
+	struct ThisChainOrigin(Result<frame_system::RawOrigin<ThisChainAccountId>, ()>);
+
+	impl From<ThisChainOrigin> for Result<frame_system::RawOrigin<ThisChainAccountId>, ThisChainOrigin> {
+		fn from(origin: ThisChainOrigin) -> Result<frame_system::RawOrigin<ThisChainAccountId>, ThisChainOrigin> {
+			origin.clone().0.map_err(|_| origin)
+		}
+	}
 
 	#[derive(Debug, PartialEq, Decode, Encode)]
 	struct BridgedChainAccountId(u32);
@@ -741,6 +767,16 @@ mod tests {
 	struct BridgedChainSignature(u32);
 	#[derive(Debug, PartialEq, Decode, Encode)]
 	enum BridgedChainCall {}
+	#[derive(Clone, Debug)]
+	struct BridgedChainOrigin;
+
+	impl From<BridgedChainOrigin> for Result<frame_system::RawOrigin<BridgedChainAccountId>, BridgedChainOrigin> {
+		fn from(
+			_origin: BridgedChainOrigin,
+		) -> Result<frame_system::RawOrigin<BridgedChainAccountId>, BridgedChainOrigin> {
+			unreachable!()
+		}
+	}
 
 	macro_rules! impl_wrapped_balance {
 		($name:ident) => {
@@ -820,6 +856,7 @@ mod tests {
 	}
 
 	impl ThisChainWithMessages for ThisChain {
+		type Origin = ThisChainOrigin;
 		type Call = ThisChainCall;
 
 		fn is_outbound_lane_enabled(lane: &LaneId) -> bool {
@@ -877,6 +914,7 @@ mod tests {
 	}
 
 	impl ThisChainWithMessages for BridgedChain {
+		type Origin = BridgedChainOrigin;
 		type Call = BridgedChainCall;
 
 		fn is_outbound_lane_enabled(_lane: &LaneId) -> bool {
@@ -986,7 +1024,7 @@ mod tests {
 		// and now check that the verifier checks the fee
 		assert_eq!(
 			source::FromThisChainMessageVerifier::<OnThisChainBridge>::verify_message(
-				&Sender::Root,
+				&ThisChainOrigin(Ok(frame_system::RawOrigin::Root)),
 				&ThisChainBalance(1),
 				&TEST_LANE_ID,
 				&test_lane_outbound_data(),
@@ -996,7 +1034,7 @@ mod tests {
 		);
 		assert!(
 			source::FromThisChainMessageVerifier::<OnThisChainBridge>::verify_message(
-				&Sender::Root,
+				&ThisChainOrigin(Ok(frame_system::RawOrigin::Root)),
 				&ThisChainBalance(1_000_000),
 				&TEST_LANE_ID,
 				&test_lane_outbound_data(),
@@ -1019,7 +1057,7 @@ mod tests {
 		// and now check that the verifier checks the fee
 		assert_eq!(
 			source::FromThisChainMessageVerifier::<OnThisChainBridge>::verify_message(
-				&Sender::Signed(ThisChainAccountId(0)),
+				&ThisChainOrigin(Ok(frame_system::RawOrigin::Signed(ThisChainAccountId(0)))),
 				&ThisChainBalance(1_000_000),
 				&TEST_LANE_ID,
 				&test_lane_outbound_data(),
@@ -1029,7 +1067,7 @@ mod tests {
 		);
 		assert_eq!(
 			source::FromThisChainMessageVerifier::<OnThisChainBridge>::verify_message(
-				&Sender::None,
+				&ThisChainOrigin(Ok(frame_system::RawOrigin::None)),
 				&ThisChainBalance(1_000_000),
 				&TEST_LANE_ID,
 				&test_lane_outbound_data(),
@@ -1039,7 +1077,7 @@ mod tests {
 		);
 		assert!(
 			source::FromThisChainMessageVerifier::<OnThisChainBridge>::verify_message(
-				&Sender::Root,
+				&ThisChainOrigin(Ok(frame_system::RawOrigin::Root)),
 				&ThisChainBalance(1_000_000),
 				&TEST_LANE_ID,
 				&test_lane_outbound_data(),
@@ -1062,7 +1100,7 @@ mod tests {
 		// and now check that the verifier checks the fee
 		assert_eq!(
 			source::FromThisChainMessageVerifier::<OnThisChainBridge>::verify_message(
-				&Sender::Signed(ThisChainAccountId(0)),
+				&ThisChainOrigin(Ok(frame_system::RawOrigin::Signed(ThisChainAccountId(0)))),
 				&ThisChainBalance(1_000_000),
 				&TEST_LANE_ID,
 				&test_lane_outbound_data(),
@@ -1072,7 +1110,7 @@ mod tests {
 		);
 		assert!(
 			source::FromThisChainMessageVerifier::<OnThisChainBridge>::verify_message(
-				&Sender::Signed(ThisChainAccountId(1)),
+				&ThisChainOrigin(Ok(frame_system::RawOrigin::Signed(ThisChainAccountId(1)))),
 				&ThisChainBalance(1_000_000),
 				&TEST_LANE_ID,
 				&test_lane_outbound_data(),
@@ -1086,7 +1124,7 @@ mod tests {
 	fn message_is_rejected_when_sent_using_disabled_lane() {
 		assert_eq!(
 			source::FromThisChainMessageVerifier::<OnThisChainBridge>::verify_message(
-				&Sender::Root,
+				&ThisChainOrigin(Ok(frame_system::RawOrigin::Root)),
 				&ThisChainBalance(1_000_000),
 				b"dsbl",
 				&test_lane_outbound_data(),
@@ -1100,7 +1138,7 @@ mod tests {
 	fn message_is_rejected_when_there_are_too_many_pending_messages_at_outbound_lane() {
 		assert_eq!(
 			source::FromThisChainMessageVerifier::<OnThisChainBridge>::verify_message(
-				&Sender::Root,
+				&ThisChainOrigin(Ok(frame_system::RawOrigin::Root)),
 				&ThisChainBalance(1_000_000),
 				&TEST_LANE_ID,
 				&OutboundLaneData {

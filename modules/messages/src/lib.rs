@@ -139,9 +139,18 @@ pub trait Config<I = DefaultInstance>: frame_system::Config {
 	/// Target header chain.
 	type TargetHeaderChain: TargetHeaderChain<Self::OutboundPayload, Self::AccountId>;
 	/// Message payload verifier.
-	type LaneMessageVerifier: LaneMessageVerifier<Self::AccountId, Self::OutboundPayload, Self::OutboundMessageFee>;
+	type LaneMessageVerifier: LaneMessageVerifier<
+		Self::Origin,
+		Self::AccountId,
+		Self::OutboundPayload,
+		Self::OutboundMessageFee,
+	>;
 	/// Message delivery payment.
-	type MessageDeliveryAndDispatchPayment: MessageDeliveryAndDispatchPayment<Self::AccountId, Self::OutboundMessageFee>;
+	type MessageDeliveryAndDispatchPayment: MessageDeliveryAndDispatchPayment<
+		Self::Origin,
+		Self::AccountId,
+		Self::OutboundMessageFee,
+	>;
 
 	// Types that are used by inbound_lane (on target chain).
 
@@ -300,7 +309,6 @@ decl_module! {
 			delivery_and_dispatch_fee: T::OutboundMessageFee,
 		) -> DispatchResult {
 			ensure_operational::<T, I>()?;
-			let submitter = origin.into().map_err(|_| BadOrigin)?;
 
 			// let's first check if message can be delivered to target chain
 			T::TargetHeaderChain::verify_message(&payload)
@@ -318,7 +326,7 @@ decl_module! {
 			// now let's enforce any additional lane rules
 			let mut lane = outbound_lane::<T, I>(lane_id);
 			T::LaneMessageVerifier::verify_message(
-				&submitter,
+				&origin,
 				&delivery_and_dispatch_fee,
 				&lane_id,
 				&lane.data(),
@@ -336,15 +344,14 @@ decl_module! {
 
 			// let's withdraw delivery and dispatch fee from submitter
 			T::MessageDeliveryAndDispatchPayment::pay_delivery_and_dispatch_fee(
-				&submitter,
+				&origin,
 				&delivery_and_dispatch_fee,
 				&Self::relayer_fund_account_id(),
 			).map_err(|err| {
 				log::trace!(
 					target: "runtime::bridge-messages",
-					"Message to lane {:?} is rejected because submitter {:?} is unable to pay fee {:?}: {:?}",
+					"Message to lane {:?} is rejected because submitter is unable to pay fee {:?}: {:?}",
 					lane_id,
-					submitter,
 					delivery_and_dispatch_fee,
 					err,
 				);
@@ -392,16 +399,14 @@ decl_module! {
 			ensure!(nonce <= lane.data().latest_generated_nonce, Error::<T, I>::MessageIsNotYetSent);
 
 			// withdraw additional fee from submitter
-			let submitter = origin.into().map_err(|_| BadOrigin)?;
 			T::MessageDeliveryAndDispatchPayment::pay_delivery_and_dispatch_fee(
-				&submitter,
+				&origin,
 				&additional_fee,
 				&Self::relayer_fund_account_id(),
 			).map_err(|err| {
 				log::trace!(
 					target: "runtime::bridge-messages",
-					"Submitter {:?} can't pay additional fee {:?} for the message {:?}/{:?}: {:?}",
-					submitter,
+					"Submitter can't pay additional fee {:?} for the message {:?}/{:?}: {:?}",
 					additional_fee,
 					lane_id,
 					nonce,

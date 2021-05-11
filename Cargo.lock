@@ -704,7 +704,6 @@ version = "0.1.0"
 dependencies = [
  "bp-runtime",
  "frame-support",
- "frame-system",
  "parity-scale-codec 2.0.1",
  "sp-std",
 ]
@@ -857,6 +856,7 @@ dependencies = [
  "bp-runtime",
  "ed25519-dalek",
  "frame-support",
+ "frame-system",
  "hash-db",
  "pallet-bridge-dispatch",
  "pallet-bridge-grandpa",
